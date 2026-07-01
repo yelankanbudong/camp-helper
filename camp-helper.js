@@ -1,6 +1,6 @@
 /**
  * 王者营地 - Roche Plugin
- * camp-helper v1.4.0
+ * camp-helper v1.5.0
  * author: yelankanbudong
  *
  * v1.4.0:
