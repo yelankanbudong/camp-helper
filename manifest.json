@@ -1,0 +1,18 @@
+{
+  "id": "camp-helper",
+  "name": "王者营地",
+  "version": "1.0.0",
+  "description": "类似王者营地的个人战绩与好友战绩看板，支持手动编辑和 AI 虚构对局。",
+  "author": "yelankanbudong",
+  "entry": "https://raw.githubusercontent.com/yelankanbudong/camp-helper/main/camp-helper.js",
+  "hash": "",
+  "permissions": [
+    "persona:read",
+    "character:read",
+    "memory:read",
+    "memory:write",
+    "ai:chat",
+    "storage",
+    "ui"
+  ]
+}
