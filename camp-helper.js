@@ -1,9 +1,13 @@
 /**
  * 王者营地 - Roche Plugin
- * camp-helper v1.3.0
+ * camp-helper v1.4.0
  * author: yelankanbudong
  *
- * v1.3.0: Char战绩保存到记忆、单条对局保存到记忆
+ * v1.4.0:
+ *   - 战力标卡片：折叠显示最高荣誉，展开显示每个英雄独立标
+ *   - AI 生成 heroesWithBadge + highestHonor
+ *   - 兼容旧 heroPower + heroes 格式
+ *   - 设置页新增"记忆管理"：查看/编辑/删除/一键清空插件写入的主记忆
  */
 ;(function () {
   "use strict"
@@ -12,23 +16,59 @@
    * 0. 常量
    * ============================== */
 
-  const POWER_ICON_MAP = [
-    { keywords: ["大国标", "国服最强前10"], url: "https://i.postimg.cc/5NLp1pcm/retouch-2026070200125627.png" },
-    { keywords: ["小国标", "国服最强前百"], url: "https://i.postimg.cc/CMZmrScd/retouch-2026070200130763.png" },
-    { keywords: ["省标"], url: "https://i.postimg.cc/J4ZKmKwq/retouch-2026070200131903.png" },
-    { keywords: ["市标"], url: "https://i.postimg.cc/bNkL8LX9/retouch-2026070200133083.png" },
-    { keywords: ["区标"], url: "https://i.postimg.cc/G3ZzZVff/retouch-2026070200134276.png" }
+  const HONOR_LEVELS = [
+    { key: "大国标", keywords: ["大国标", "国服最强前10", "国服最强"], url: "https://i.postimg.cc/5NLp1pcm/retouch-2026070200125627.png" },
+    { key: "小国标", keywords: ["小国标", "国服最强前百"], url: "https://i.postimg.cc/CMZmrScd/retouch-2026070200130763.png" },
+    { key: "省标", keywords: ["省标"], url: "https://i.postimg.cc/J4ZKmKwq/retouch-2026070200131903.png" },
+    { key: "市标", keywords: ["市标"], url: "https://i.postimg.cc/bNkL8LX9/retouch-2026070200133083.png" },
+    { key: "区标", keywords: ["区标"], url: "https://i.postimg.cc/G3ZzZVff/retouch-2026070200134276.png" }
   ]
 
-  function getPowerIconUrl(text) {
+  function getHonorEntry(text) {
     if (!text) return null
     const t = text.trim()
-    for (const entry of POWER_ICON_MAP) {
+    for (const entry of HONOR_LEVELS) {
       for (const kw of entry.keywords) {
-        if (t.includes(kw)) return entry.url
+        if (t.includes(kw)) return entry
       }
     }
     return null
+  }
+
+  function getHonorIconUrl(text) {
+    const entry = getHonorEntry(text)
+    return entry ? entry.url : null
+  }
+
+  /** 从 heroesWithBadge 数组中取最高荣誉 key */
+  function computeHighestHonor(heroesWithBadge) {
+    if (!Array.isArray(heroesWithBadge) || heroesWithBadge.length === 0) return ""
+    let best = -1
+    let bestKey = ""
+    for (const h of heroesWithBadge) {
+      const idx = HONOR_LEVELS.findIndex(l => l.key === h.badge)
+      if (idx !== -1 && (best === -1 || idx < best)) { best = idx; bestKey = h.badge }
+    }
+    return bestKey
+  }
+
+  /** 兼容：从旧格式 stats 构建 heroesWithBadge */
+  function normalizeHeroesWithBadge(stats) {
+    if (Array.isArray(stats.heroesWithBadge) && stats.heroesWithBadge.length > 0) {
+      return stats.heroesWithBadge
+    }
+    const heroList = stats.heroes ? stats.heroes.split(/[,，\s]+/).filter(Boolean) : []
+    const badge = stats.heroPower || ""
+    return heroList.map(name => ({ name, badge }))
+  }
+
+  /** 兼容：获取展示用最高荣誉 */
+  function normalizeHighestHonor(stats) {
+    if (stats.highestHonor) return stats.highestHonor
+    if (Array.isArray(stats.heroesWithBadge) && stats.heroesWithBadge.length > 0) {
+      return computeHighestHonor(stats.heroesWithBadge)
+    }
+    return stats.heroPower || ""
   }
 
   const LABEL_COLOR_MAP = {
@@ -168,7 +208,7 @@
 .ch-power-hero-item {
   display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; color: #ccc;
 }
-.ch-power-hero-item::before { content: "◆"; color: #D4A84B; font-size: 8px; }
+.ch-power-hero-icon { width: 14px; height: 14px; object-fit: contain; flex-shrink: 0; }
 
 .ch-heroes-section { margin-bottom: 16px; }
 .ch-section-title {
@@ -189,6 +229,14 @@
 }
 .ch-edit-field:focus { border-color: #D4A84B; }
 .ch-edit-field::placeholder { color: #555; }
+.ch-edit-textarea {
+  width: 100%; background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(212,168,75,0.3); border-radius: 8px;
+  color: #fff; padding: 8px 12px; font-size: 14px; outline: none; transition: border-color 0.2s;
+  resize: vertical; min-height: 80px; font-family: inherit; line-height: 1.5;
+}
+.ch-edit-textarea:focus { border-color: #D4A84B; }
+.ch-edit-textarea::placeholder { color: #555; }
 .ch-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .ch-btn {
   border: none; border-radius: 10px; padding: 8px 20px; font-size: 13px;
@@ -402,6 +450,46 @@
 .ch-default-avatar.xlarge { width: 64px; height: 64px; font-size: 24px; }
 .ch-char-stats-loading { text-align: center; padding: 20px; color: #888; font-size: 13px; }
 .ch-char-stats-refresh { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+
+/* ── 记忆管理 ── */
+.ch-memory-item {
+  background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px; padding: 12px 14px; margin-bottom: 8px;
+  animation: chFadeIn 0.2s ease;
+}
+.ch-memory-text { font-size: 13px; color: #ccc; line-height: 1.5; word-break: break-all; }
+.ch-memory-meta { font-size: 11px; color: #555; margin-top: 6px; }
+.ch-memory-actions {
+  display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end;
+}
+.ch-memory-btn {
+  background: none; border: none; cursor: pointer; font-size: 13px;
+  padding: 4px 10px; border-radius: 6px; transition: background 0.2s;
+}
+.ch-memory-btn-edit { color: #D4A84B; }
+.ch-memory-btn-edit:hover { background: rgba(212,168,75,0.12); }
+.ch-memory-btn-delete { color: #ff6b6b; }
+.ch-memory-btn-delete:hover { background: rgba(220,53,69,0.12); }
+.ch-memory-loading { text-align: center; padding: 16px; color: #888; font-size: 13px; }
+
+/* ── 英雄标编辑行 ── */
+.ch-hero-badge-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+  padding: 6px 8px; background: rgba(255,255,255,0.02); border-radius: 8px;
+}
+.ch-hero-badge-row .ch-edit-field { flex: 1; padding: 6px 10px; font-size: 13px; }
+.ch-hero-badge-row .ch-select { font-size: 12px; padding: 5px 8px; }
+.ch-hero-badge-add {
+  background: rgba(212,168,75,0.1); border: 1px dashed rgba(212,168,75,0.3);
+  border-radius: 8px; padding: 8px; text-align: center; cursor: pointer;
+  color: #D4A84B; font-size: 13px; transition: background 0.2s; margin-top: 4px;
+}
+.ch-hero-badge-add:hover { background: rgba(212,168,75,0.2); }
+.ch-hero-badge-remove {
+  background: none; border: none; cursor: pointer; color: #666;
+  font-size: 14px; padding: 2px 6px; border-radius: 4px; transition: color 0.2s;
+}
+.ch-hero-badge-remove:hover { color: #ff6b6b; }
 `
 
   /* ==============================
@@ -450,7 +538,7 @@
   window.RochePlugin.register({
     id: "camp-helper",
     name: "王者营地",
-    version: "1.3.0",
+    version: "1.4.0",
     apps: [
       {
         id: "camp-helper-home",
@@ -493,8 +581,14 @@
             charStatsLoading: false,
             friendPersonaBindings: {},
             powerExpanded: {},
-            // 已保存到记忆的对局索引 { "personaId:0": true, "charId:2": true }
             savedMatchKeys: {},
+            // 记忆管理
+            memoryList: [],
+            memoryLoading: false,
+            memoryEditId: null,
+            memoryEditText: "",
+            // 编辑模态框
+            editMemoryModalOpen: false,
           }
           app._state = state
 
@@ -550,6 +644,7 @@
             else if (state.view === "friendDetail") root.appendChild(renderFriendDetail())
             root.appendChild(renderSidebar())
             root.appendChild(renderAddFriendModal())
+            root.appendChild(renderEditMemoryModal())
           }
 
           function renderTopbar() {
@@ -589,8 +684,8 @@
 
           function getCurrentStats() {
             const pid = state.activePersonaId
-            if (!pid) return { rank: "", winRate: "", peakScore: "", heroPower: "", heroes: "" }
-            return state.statsMap[pid] || { rank: "", winRate: "", peakScore: "", heroPower: "", heroes: "" }
+            if (!pid) return { rank: "", winRate: "", peakScore: "", heroPower: "", heroes: "", highestHonor: "", heroesWithBadge: [] }
+            return state.statsMap[pid] || { rank: "", winRate: "", peakScore: "", heroPower: "", heroes: "", highestHonor: "", heroesWithBadge: [] }
           }
 
           function renderHome() {
@@ -615,93 +710,186 @@
             return main
           }
 
-          /* ── 战绩展示 ── */
+          /* ══════════════════════════════════════
+           * 战绩展示（兼容新旧格式）
+           * ══════════════════════════════════════ */
           function renderStatsDisplay(stats, entityId) {
             const wrap = el("div")
             const grid = el("div", { className: "ch-stats-grid" })
-            const powerText = stats.heroPower || "—"
-            const powerIconUrl = getPowerIconUrl(powerText)
+
+            // 兼容处理：取 heroesWithBadge 和 highestHonor
+            const heroesWB = normalizeHeroesWithBadge(stats)
+            const highestHonor = normalizeHighestHonor(stats)
+            const highestIconUrl = getHonorIconUrl(highestHonor)
             const isExpanded = !!state.powerExpanded[entityId]
-            const heroList = stats.heroes ? stats.heroes.split(/[,，\s]+/).filter(Boolean) : []
 
             const items = [
               { label: "段位", value: stats.rank || "未设定", gold: true },
               { label: "胜率", value: stats.winRate ? stats.winRate + "%" : "—" },
               { label: "巅峰赛分数", value: stats.peakScore || "—", gold: true },
-              { label: "英雄战力标", value: powerText, isPower: true }
+              { label: "英雄战力标", isPower: true }
             ]
             for (const it of items) {
               const isPower = !!it.isPower
               const si = el("div", { className: `ch-stat-item${isPower ? " clickable" + (isExpanded ? " expanded" : "") : ""}` })
               if (isPower) si.addEventListener("click", async () => { state.powerExpanded[entityId] = !state.powerExpanded[entityId]; await roche.storage.set("powerExpanded", state.powerExpanded); render() })
               si.appendChild(el("div", { className: "ch-stat-label" }, it.label))
-              const valueDiv = el("div", { className: `ch-stat-value ${it.gold ? "gold" : ""}` })
-              if (isPower && powerIconUrl) { const ic = el("img", { className: "ch-power-icon" }); ic.src = powerIconUrl; ic.alt = ""; ic.onerror = function () { this.style.display = "none" }; valueDiv.appendChild(ic) }
-              valueDiv.appendChild(document.createTextNode(it.value)); si.appendChild(valueDiv)
+
               if (isPower) {
+                // 折叠状态：显示最高荣誉
+                const valueDiv = el("div", { className: "ch-stat-value" })
+                const displayHonor = highestHonor || "—"
+                if (highestIconUrl) {
+                  const ic = el("img", { className: "ch-power-icon" })
+                  ic.src = highestIconUrl; ic.alt = ""
+                  ic.onerror = function () { this.style.display = "none" }
+                  valueDiv.appendChild(ic)
+                }
+                valueDiv.appendChild(document.createTextNode(displayHonor))
+                si.appendChild(valueDiv)
+
                 si.appendChild(el("div", { className: "ch-power-expand-hint" }, isExpanded ? "▲ 收起英雄列表" : "▼ 点击查看英雄列表"))
+
+                // 展开状态：显示每个英雄独立标
                 if (isExpanded) {
                   const hld = el("div", { className: "ch-power-hero-list" })
-                  if (heroList.length === 0) hld.appendChild(el("div", { className: "ch-power-hero-item", style: "color:#666;" }, "暂未绑定英雄"))
-                  else for (const h of heroList) {
-                    const hi = el("div", { className: "ch-power-hero-item" })
-                    if (powerIconUrl) { const mi = el("img", { className: "ch-power-icon", style: "width:14px;height:14px;" }); mi.src = powerIconUrl; mi.alt = ""; mi.onerror = function () { this.style.display = "none" }; hi.appendChild(mi) }
-                    hi.appendChild(document.createTextNode(h)); hld.appendChild(hi)
+                  if (heroesWB.length === 0) {
+                    hld.appendChild(el("div", { className: "ch-power-hero-item", style: "color:#666;" }, "暂未绑定英雄"))
+                  } else {
+                    for (const h of heroesWB) {
+                      const hi = el("div", { className: "ch-power-hero-item" })
+                      const badgeUrl = getHonorIconUrl(h.badge)
+                      if (badgeUrl) {
+                        const mi = el("img", { className: "ch-power-hero-icon" })
+                        mi.src = badgeUrl; mi.alt = ""
+                        mi.onerror = function () { this.style.display = "none" }
+                        hi.appendChild(mi)
+                      }
+                      const badgeText = h.badge || "无"
+                      hi.appendChild(document.createTextNode(badgeText + " " + h.name))
+                      hld.appendChild(hi)
+                    }
                   }
                   si.appendChild(hld)
                 }
+              } else {
+                const valueDiv = el("div", { className: `ch-stat-value ${it.gold ? "gold" : ""}` })
+                valueDiv.appendChild(document.createTextNode(it.value))
+                si.appendChild(valueDiv)
               }
+
               grid.appendChild(si)
             }
             wrap.appendChild(grid)
 
+            // 常用英雄 tag 区域
+            const heroNames = heroesWB.map(h => h.name)
             const sec = el("div", { className: "ch-heroes-section" })
             sec.appendChild(el("div", { className: "ch-section-title" }, "常用英雄"))
             const tags = el("div", { className: "ch-hero-tags" })
-            if (heroList.length === 0) tags.appendChild(el("span", { className: "ch-hero-tag" }, "暂未设定"))
-            else for (const h of heroList) tags.appendChild(el("span", { className: "ch-hero-tag" }, h))
+            if (heroNames.length === 0) tags.appendChild(el("span", { className: "ch-hero-tag" }, "暂未设定"))
+            else for (const h of heroNames) tags.appendChild(el("span", { className: "ch-hero-tag" }, h))
             sec.appendChild(tags); wrap.appendChild(sec)
             return wrap
           }
 
-          /* ── 编辑表单 ── */
+          /* ══════════════════════════════════════
+           * 编辑表单（User 侧手动编辑）
+           * ══════════════════════════════════════ */
           function renderEditForm(stats) {
             const form = el("div")
-            const fields = [
+
+            // 基础字段
+            const basicFields = [
               { key: "rank", label: "段位", placeholder: "例如：王者 50 星" },
               { key: "winRate", label: "胜率（%）", placeholder: "例如：56.3" },
-              { key: "peakScore", label: "巅峰赛分数", placeholder: "例如：1800" },
-              { key: "heroPower", label: "英雄战力标", placeholder: "例如：大国标 / 小国标 / 省标 / 市标 / 区标" },
-              { key: "heroes", label: "常用英雄（逗号或空格分隔）", placeholder: "例如：韩信, 李白, 露娜" }
+              { key: "peakScore", label: "巅峰赛分数", placeholder: "例如：1800" }
             ]
             const inputs = {}
-            for (const f of fields) {
+            for (const f of basicFields) {
               const row = el("div", { style: "margin-bottom: 12px;" })
               row.appendChild(el("div", { className: "ch-stat-label", style: "margin-bottom: 6px;" }, f.label))
               const inp = el("input", { className: "ch-edit-field", placeholder: f.placeholder }); inp.value = stats[f.key] || ""
               inputs[f.key] = inp; row.appendChild(inp); form.appendChild(row)
             }
+
+            // 英雄 + 战力标编辑（每个英雄独立分配标）
+            const badgeSection = el("div", { style: "margin-bottom: 12px;" })
+            badgeSection.appendChild(el("div", { className: "ch-stat-label", style: "margin-bottom: 6px;" }, "英雄与战力标（每个英雄可独立选标）"))
+
+            const existingHWB = normalizeHeroesWithBadge(stats)
+            const editRows = existingHWB.length > 0
+              ? existingHWB.map(h => ({ name: h.name, badge: h.badge }))
+              : [{ name: "", badge: "无" }]
+
+            const rowContainer = el("div")
+
+            function addRow(name, badge) {
+              const row = el("div", { className: "ch-hero-badge-row" })
+              const nameInp = el("input", { className: "ch-edit-field", placeholder: "英雄名" })
+              nameInp.value = name || ""
+              row.appendChild(nameInp)
+
+              const sel = el("select", { className: "ch-select" })
+              const options = ["大国标", "小国标", "省标", "市标", "区标", "无"]
+              for (const o of options) {
+                const opt = el("option", { value: o }, o)
+                if (o === badge) opt.selected = true
+                sel.appendChild(opt)
+              }
+              row.appendChild(sel)
+
+              const removeBtn = el("button", { className: "ch-hero-badge-remove", onClick() { row.remove() } }, "✕")
+              row.appendChild(removeBtn)
+
+              row._getVal = () => ({ name: nameInp.value.trim(), badge: sel.value })
+              rowContainer.appendChild(row)
+            }
+
+            for (const r of editRows) addRow(r.name, r.badge)
+
+            badgeSection.appendChild(rowContainer)
+            badgeSection.appendChild(el("div", { className: "ch-hero-badge-add", onClick() { addRow("", "无") } }, "+ 添加英雄"))
+            form.appendChild(badgeSection)
+
             const actions = el("div", { className: "ch-edit-actions" })
             actions.appendChild(el("button", { className: "ch-btn ch-btn-secondary", onClick() { state.editing = false; render() } }, "取消"))
             actions.appendChild(el("button", {
               className: "ch-btn ch-btn-primary",
               async onClick() {
                 const pid = state.activePersonaId; if (!pid) return
-                const ns = {}; for (const f of fields) ns[f.key] = inputs[f.key].value.trim()
+                const ns = {}
+                for (const f of basicFields) ns[f.key] = inputs[f.key].value.trim()
+
+                // 收集英雄 + 标数据
+                const rows = rowContainer.querySelectorAll(".ch-hero-badge-row")
+                const heroesWithBadge = []
+                for (const r of rows) {
+                  const val = r._getVal()
+                  if (val.name) heroesWithBadge.push(val)
+                }
+                ns.heroesWithBadge = heroesWithBadge
+                ns.highestHonor = computeHighestHonor(heroesWithBadge)
+                // 兼容旧字段
+                ns.heroes = heroesWithBadge.map(h => h.name).join(", ")
+                ns.heroPower = ns.highestHonor || "无"
+
                 state.statsMap[pid] = ns; await roche.storage.set("statsMap", state.statsMap)
                 state.editing = false; roche.ui.toast("战绩已保存")
+
                 if (state.writeToMainMemory) {
                   const persona = state.personas.find(p => p.id === pid)
                   const pname = persona ? (persona.name || persona.handle || "用户") : "用户"
-                  const ok = await roche.ui.confirm({ title: "写入主记忆", message: `是否将 ${pname} 的战绩写入 Roche 主记忆？\n段位：${ns.rank || "—"}\n胜率：${ns.winRate || "—"}%\n巅峰分：${ns.peakScore || "—"}\n\n注意：主记忆不会随插件卸载删除。` })
+                  const heroBadgeStr = heroesWithBadge.map(h => h.name + "(" + h.badge + ")").join("、")
+                  const ok = await roche.ui.confirm({ title: "写入主记忆", message: `是否将 ${pname} 的战绩写入 Roche 主记忆？\n段位：${ns.rank || "—"}\n胜率：${ns.winRate || "—"}%\n巅峰分：${ns.peakScore || "—"}\n英雄战力：${heroBadgeStr || "—"}\n\n注意：主记忆不会随插件卸载删除。` })
                   if (ok) {
                     try {
                       const convId = await getConvIdForPersona(pid)
                       if (!convId) { roche.ui.toast("无可用会话，无法写入"); render(); return }
                       const parts = []
                       if (ns.rank) parts.push("段位: " + ns.rank); if (ns.winRate) parts.push("胜率: " + ns.winRate + "%")
-                      if (ns.peakScore) parts.push("巅峰赛分数: " + ns.peakScore); if (ns.heroPower) parts.push("英雄战力标: " + ns.heroPower)
-                      if (ns.heroes) parts.push("常用英雄: " + ns.heroes)
+                      if (ns.peakScore) parts.push("巅峰赛分数: " + ns.peakScore)
+                      if (heroBadgeStr) parts.push("英雄战力: " + heroBadgeStr)
                       await roche.memory.write({ conversationId: convId, summaryText: pname + " 的王者荣耀战绩：" + parts.join("；"), who: [pname], action: "更新了王者荣耀战绩", when: new Date().toLocaleDateString("zh-CN"), where: "王者营地插件", source: "plugin" })
                       roche.ui.toast("已写入主记忆")
                     } catch (e) { roche.ui.toast("写入失败：" + (e.message || e)) }
@@ -773,7 +961,6 @@
                     const convId = isFriend ? await getConvIdForChar(entityId) : await getConvIdForPersona(entityId)
                     if (!convId) { roche.ui.toast("无可用会话，无法写入记忆"); return }
 
-                    // 确定角色名
                     let who = "用户"
                     if (isFriend) {
                       const char = state.characters.find(c => c.id === entityId)
@@ -882,7 +1069,7 @@ ${heroInst}
 
               const result = await roche.ai.chat({ messages: [{ role: "system", content: sysPrompt }, { role: "user", content: "请为 " + targetName + " 生成 5 场王者荣耀对局记录。" }], temperature: 0.85 })
               let matches = []
-              try { const t = result.text || ""; const jm = t.match(/\[[\s\S]*\]/); if (jm) matches = JSON.parse(jm[0]) } catch (e) { matches = [{ time: "刚刚", hero: "妲己", kda: "3/2/5", result: "win", label: "实力局", innerVoice: "AI返回格式有点问题…先凑合看" }] }
+              try { const t = result.text || ""; const jm = t.match(/$$[\s\S]*$$/); if (jm) matches = JSON.parse(jm[0]) } catch (e) { matches = [{ time: "刚刚", hero: "妲己", kda: "3/2/5", result: "win", label: "实力局", innerVoice: "AI返回格式有点问题…先凑合看" }] }
 
               // 刷新对局时清除该实体旧的 saved 标记
               const prefix = entityId + ":"
@@ -898,7 +1085,9 @@ ${heroInst}
             }
           }
 
-          /* ── Char AI 战绩 ── */
+          /* ══════════════════════════════════════
+           * Char AI 战绩（新 prompt：heroesWithBadge）
+           * ══════════════════════════════════════ */
           async function generateCharStats(charId) {
             const char = state.characters.find(c => c.id === charId); if (!char) return
             state.charStatsLoading = true; render()
@@ -919,20 +1108,49 @@ ${cp.length > 0 ? "\n背景信息：\n" + cp.join("\n\n") : ""}
 - rank: 段位（如"星耀III"、"王者28星"）
 - winRate: 胜率数字（如"52.1"，不带%）
 - peakScore: 巅峰赛分数（如"1650"，段位不高可留空）
-- heroPower: 英雄战力标（从"大国标"、"小国标"、"省标"、"市标"、"区标"、"无"中选）
-- heroes: 常用英雄（3-5个，逗号分隔）
+- highestHonor: 该角色最高荣誉标，从"大国标"、"小国标"、"省标"、"市标"、"区标"中选一个
+- heroesWithBadge: 数组，4-6个英雄，其中约80%是角色可能常用的英雄，约20%随机补充。每个英雄独立分配一个标（可以是不同等级的标，混合分配）。格式：[{"name":"李白","badge":"大国标"},{"name":"韩信","badge":"省标"}]
+
+注意：
+- heroesWithBadge 中 badge 的最高值应等于 highestHonor
+- 标等级从高到低：大国标 > 小国标 > 省标 > 市标 > 区标
+- 每个英雄的标独立随机，允许高中低混合
 
 只输出 JSON 对象。`
+
               const r = await roche.ai.chat({ messages: [{ role: "system", content: prompt }, { role: "user", content: "请为 " + tn + " 生成战绩资料。" }], temperature: 0.8 })
-              let cs = { rank: "", winRate: "", peakScore: "", heroPower: "", heroes: "" }
-              try { const t = r.text || ""; const jm = t.match(/\{[\s\S]*\}/); if (jm) { const p = JSON.parse(jm[0]); cs.rank = String(p.rank || ""); cs.winRate = String(p.winRate || ""); cs.peakScore = String(p.peakScore || ""); cs.heroPower = String(p.heroPower || ""); cs.heroes = String(p.heroes || "") } } catch (e) { cs = { rank: "黄金I", winRate: "48.5", peakScore: "", heroPower: "无", heroes: "妲己, 安琪拉, 亚瑟" } }
+              let cs = { rank: "", winRate: "", peakScore: "", highestHonor: "", heroesWithBadge: [], heroPower: "", heroes: "" }
+              try {
+                const t = r.text || ""; const jm = t.match(/\{[\s\S]*\}/)
+                if (jm) {
+                  const p = JSON.parse(jm[0])
+                  cs.rank = String(p.rank || "")
+                  cs.winRate = String(p.winRate || "")
+                  cs.peakScore = String(p.peakScore || "")
+                  cs.highestHonor = String(p.highestHonor || "")
+                  cs.heroesWithBadge = Array.isArray(p.heroesWithBadge) ? p.heroesWithBadge.map(h => ({ name: String(h.name || ""), badge: String(h.badge || "无") })) : []
+                  // 如果 AI 没返回 highestHonor，从 heroesWithBadge 计算
+                  if (!cs.highestHonor && cs.heroesWithBadge.length > 0) {
+                    cs.highestHonor = computeHighestHonor(cs.heroesWithBadge)
+                  }
+                  // 兼容旧字段
+                  cs.heroPower = cs.highestHonor || "无"
+                  cs.heroes = cs.heroesWithBadge.map(h => h.name).join(", ")
+                }
+              } catch (e) {
+                cs = { rank: "黄金I", winRate: "48.5", peakScore: "", highestHonor: "区标", heroesWithBadge: [{ name: "妲己", badge: "区标" }, { name: "安琪拉", badge: "区标" }, { name: "亚瑟", badge: "区标" }], heroPower: "区标", heroes: "妲己, 安琪拉, 亚瑟" }
+              }
               state.charStatsMap[charId] = cs; state.charStatsLoading = false; await roche.storage.set("charStatsMap", state.charStatsMap)
-            } catch (e) { state.charStatsMap[charId] = { rank: "未知", winRate: "—", peakScore: "", heroPower: "", heroes: "" }; state.charStatsLoading = false; await roche.storage.set("charStatsMap", state.charStatsMap) }
+            } catch (e) { state.charStatsMap[charId] = { rank: "未知", winRate: "—", peakScore: "", highestHonor: "", heroesWithBadge: [], heroPower: "", heroes: "" }; state.charStatsLoading = false; await roche.storage.set("charStatsMap", state.charStatsMap) }
           }
 
-          /* ── 设置页 ── */
+          /* ══════════════════════════════════════
+           * 设置页（含记忆管理）
+           * ══════════════════════════════════════ */
           function renderSettings() {
             const wrap = el("div", { className: "ch-main ch-settings" })
+
+            /* ── 记忆设置 ── */
             const memSec = el("div", { className: "ch-settings-section" })
             memSec.appendChild(el("div", { className: "ch-settings-section-title" }, "记忆设置"))
             const wr = el("div", { className: "ch-settings-row" })
@@ -950,6 +1168,117 @@ ${cp.length > 0 ? "\n背景信息：\n" + cp.join("\n\n") : ""}
             for (const v of [10, 30, 50]) { const o = el("option", { value: String(v) }, v + " 条"); if (state.shortTermLimit === v) o.selected = true; ls.appendChild(o) }
             lr.appendChild(ls); memSec.appendChild(lr); wrap.appendChild(memSec)
 
+            /* ── 记忆管理 ── */
+            const mmSec = el("div", { className: "ch-settings-section" })
+            mmSec.appendChild(el("div", { className: "ch-settings-section-title" }, "记忆管理"))
+            mmSec.appendChild(el("div", { className: "ch-settings-hint", style: "margin-bottom:12px;" }, "查看和管理插件已写入 Roche 主记忆的内容。仅显示包含「王者营地」关键词的记忆。"))
+
+            // 加载/刷新按钮
+            const loadRow = el("div", { style: "display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;" })
+            loadRow.appendChild(el("button", {
+              className: "ch-btn ch-btn-secondary", style: "font-size:12px;padding:6px 14px;",
+              async onClick() {
+                state.memoryLoading = true; render()
+                try {
+                  const allResults = []
+                  // 搜索所有会话中的王者营地相关记忆
+                  const convs = await roche.conversation.list()
+                  for (const conv of convs) {
+                    const cid = conv.conversationId || conv.id
+                    try {
+                      const res = await roche.memory.search({ conversationId: cid, query: "王者营地", limit: 80 })
+                      if (Array.isArray(res)) {
+                        for (const r of res) {
+                          const item = r.item || r
+                          if (item && (item.summaryText || item.action || item.text || "").includes("王者营地")) {
+                            allResults.push({ ...item, _conversationId: cid, _kind: r.kind || "fact" })
+                          }
+                        }
+                      }
+                    } catch (e) {}
+                  }
+                  state.memoryList = allResults
+                } catch (e) { state.memoryList = []; roche.ui.toast("加载失败：" + (e.message || e)) }
+                state.memoryLoading = false; render()
+              }
+            }, "🔍 加载插件记忆"))
+
+            if (state.memoryList.length > 0) {
+              loadRow.appendChild(el("button", {
+                className: "ch-btn ch-btn-danger", style: "font-size:12px;padding:6px 14px;",
+                async onClick() {
+                  const ok1 = await roche.ui.confirm({ title: "一键清空", message: `确定要删除所有包含「王者营地」标记的主记忆吗？\n共 ${state.memoryList.length} 条。\n\n此操作不可撤销！` })
+                  if (!ok1) return
+                  const ok2 = await roche.ui.confirm({ title: "二次确认", message: "真的确定要删除吗？删除后无法恢复。" })
+                  if (!ok2) return
+                  let deleted = 0, failed = 0
+                  for (const m of state.memoryList) {
+                    if (m.id) {
+                      try { await roche.memory.delete(m.id); deleted++ } catch (e) { failed++ }
+                    }
+                  }
+                  state.memoryList = []
+                  roche.ui.toast(`已删除 ${deleted} 条${failed > 0 ? "，" + failed + " 条失败" : ""}`)
+                  render()
+                }
+              }, "🗑️ 一键清空全部"))
+            }
+            mmSec.appendChild(loadRow)
+
+            // 记忆列表
+            if (state.memoryLoading) {
+              const ld = el("div", { className: "ch-memory-loading" })
+              ld.innerHTML = '<div class="ch-match-loading-spinner"></div><div style="margin-top:8px;">正在搜索记忆…</div>'
+              mmSec.appendChild(ld)
+            } else if (state.memoryList.length > 0) {
+              for (const m of state.memoryList) {
+                const mItem = el("div", { className: "ch-memory-item" })
+                const text = m.summaryText || m.action || m.text || "（无内容）"
+                mItem.appendChild(el("div", { className: "ch-memory-text" }, text))
+                const metaParts = []
+                if (m.who && Array.isArray(m.who) && m.who.length > 0) metaParts.push("对象：" + m.who.join(", "))
+                if (m.when) metaParts.push("时间：" + m.when)
+                if (m._kind) metaParts.push("类型：" + m._kind)
+                if (metaParts.length > 0) mItem.appendChild(el("div", { className: "ch-memory-meta" }, metaParts.join(" · ")))
+
+                const actions = el("div", { className: "ch-memory-actions" })
+                // 编辑
+                actions.appendChild(el("button", {
+                  className: "ch-memory-btn ch-memory-btn-edit",
+                  async onClick() {
+                    state.memoryEditId = m.id
+                    state.memoryEditText = m.summaryText || m.action || m.text || ""
+                    state.editMemoryModalOpen = true
+                    render()
+                  }
+                }, "✏️ 编辑"))
+                               // 删除
+                actions.appendChild(el("button", {
+                  className: "ch-memory-btn ch-memory-btn-delete",
+                  async onClick() {
+                    if (!m.id) { roche.ui.toast("该记忆无 ID，无法删除"); return }
+                    const ok = await roche.ui.confirm({ title: "确认删除", message: `确定要删除这条记忆吗？\n\n"${text.slice(0, 80)}${text.length > 80 ? "…" : ""}"\n\n此操作不可撤销。` })
+                    if (!ok) return
+                    try {
+                      await roche.memory.delete(m.id)
+                      state.memoryList = state.memoryList.filter(x => x.id !== m.id)
+                      roche.ui.toast("已删除")
+                      render()
+                    } catch (e) { roche.ui.toast("删除失败：" + (e.message || e)) }
+                  }
+                }, "🗑️ 删除"))
+
+                mItem.appendChild(actions)
+                mmSec.appendChild(mItem)
+              }
+            } else if (!state.memoryLoading && state.memoryList.length === 0) {
+              // 只有点过加载按钮后才显示空提示（用一个标记判断）
+              mmSec.appendChild(el("div", { className: "ch-empty-hint", style: "padding:16px;" }, "暂无插件写入的记忆\n点击上方按钮加载"))
+            }
+
+            wrap.appendChild(mmSec)
+
+            /* ── 数据管理 ── */
             const ds = el("div", { className: "ch-settings-section" }); ds.appendChild(el("div", { className: "ch-settings-section-title" }, "数据管理"))
             const cr = el("div", { className: "ch-settings-row" }); cr.appendChild(el("div", { className: "ch-settings-label" }, "清空所有战绩数据"))
             cr.appendChild(el("button", { className: "ch-btn ch-btn-danger", async onClick() {
@@ -962,6 +1291,44 @@ ${cp.length > 0 ? "\n背景信息：\n" + cp.join("\n\n") : ""}
               }
             } }, "恢复默认 / 清空所有"))
             ds.appendChild(cr); wrap.appendChild(ds); return wrap
+          }
+
+          /* ══════════════════════════════════════
+           * 编辑记忆模态框
+           * ══════════════════════════════════════ */
+          function renderEditMemoryModal() {
+            const ov = el("div", { className: `ch-modal-overlay ${state.editMemoryModalOpen ? "open" : ""}` })
+            const md = el("div", { className: "ch-modal" })
+            md.appendChild(el("div", { className: "ch-modal-header" }, "编辑记忆"))
+            const bd = el("div", { className: "ch-modal-body" })
+            const ta = el("textarea", { className: "ch-edit-textarea", placeholder: "记忆内容…", rows: "5" })
+            ta.value = state.memoryEditText || ""
+            ta.addEventListener("input", function () { state.memoryEditText = this.value })
+            bd.appendChild(ta)
+            md.appendChild(bd)
+            const ft = el("div", { className: "ch-modal-footer" })
+            ft.appendChild(el("button", { className: "ch-btn ch-btn-secondary", onClick() { state.editMemoryModalOpen = false; state.memoryEditId = null; state.memoryEditText = ""; render() } }, "取消"))
+            ft.appendChild(el("button", {
+              className: "ch-btn ch-btn-primary",
+              async onClick() {
+                const id = state.memoryEditId
+                const newText = state.memoryEditText.trim()
+                if (!id) { roche.ui.toast("无法编辑：缺少记忆 ID"); return }
+                if (!newText) { roche.ui.toast("内容不能为空"); return }
+                try {
+                  await roche.memory.update(id, { summaryText: newText })
+                  // 同步更新本地列表
+                  const found = state.memoryList.find(x => x.id === id)
+                  if (found) { found.summaryText = newText; found.action = newText; found.text = newText }
+                  state.editMemoryModalOpen = false; state.memoryEditId = null; state.memoryEditText = ""
+                  roche.ui.toast("记忆已更新")
+                  render()
+                } catch (e) { roche.ui.toast("更新失败：" + (e.message || e)) }
+              }
+            }, "保存"))
+            md.appendChild(ft); ov.appendChild(md)
+            ov.addEventListener("click", (e) => { if (e.target === ov) { state.editMemoryModalOpen = false; state.memoryEditId = null; state.memoryEditText = ""; render() } })
+            return ov
           }
 
           /* ── 侧边栏 ── */
@@ -1063,8 +1430,11 @@ ${cp.length > 0 ? "\n背景信息：\n" + cp.join("\n\n") : ""}
                   if (cs.rank) parts.push("段位: " + cs.rank)
                   if (cs.winRate) parts.push("胜率: " + cs.winRate + "%")
                   if (cs.peakScore) parts.push("巅峰赛分数: " + cs.peakScore)
-                  if (cs.heroPower) parts.push("战力标: " + cs.heroPower)
-                  if (cs.heroes) parts.push("常用英雄: " + cs.heroes)
+                  const hwb = normalizeHeroesWithBadge(cs)
+                  if (hwb.length > 0) {
+                    const heroBadgeStr = hwb.map(h => h.name + "(" + h.badge + ")").join("、")
+                    parts.push("英雄战力: " + heroBadgeStr)
+                  }
                   const summaryText = who + " 的王者荣耀战绩：" + parts.join("；")
 
                   const ok = await roche.ui.confirm({ title: "保存战绩到记忆", message: `将以下内容写入 Roche 主记忆：\n\n${summaryText}\n\n注意：主记忆不会随插件卸载删除。` })
@@ -1119,3 +1489,4 @@ ${cp.length > 0 ? "\n背景信息：\n" + cp.join("\n\n") : ""}
     ]
   })
 })()
+
