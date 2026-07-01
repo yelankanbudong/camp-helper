@@ -1,9 +1,10 @@
 /**
  * 王者营地 - Roche Plugin
- * camp-helper v1.0.0
+ * camp-helper v1.1.0
  * author: yelankanbudong
  *
  * 个人战绩与好友战绩看板，支持手动编辑和 AI 虚构对局。
+ * v1.1.0: 对局持久化、Char独立AI战绩、英雄分配优化、顶栏合并、心声口语化
  */
 ;(function () {
   "use strict"
@@ -753,6 +754,20 @@
 .ch-default-avatar.medium { width: 40px; height: 40px; font-size: 16px; }
 .ch-default-avatar.large { width: 44px; height: 44px; font-size: 18px; }
 .ch-default-avatar.xlarge { width: 64px; height: 64px; font-size: 24px; }
+
+/* ── Char 战绩生成中 ── */
+.ch-char-stats-loading {
+  text-align: center;
+  padding: 20px;
+  color: #888;
+  font-size: 13px;
+}
+.ch-char-stats-refresh {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+  margin-bottom: 4px;
+}
 `
 
   /* ==============================
@@ -785,9 +800,7 @@
       const img = el("img", { className: classMap[sizeClass] || "ch-friend-avatar" })
       img.src = src
       img.alt = name || ""
-      img.onerror = function () {
-        this.replaceWith(makeDefaultAvatar(name, sizeClass))
-      }
+      img.onerror = function () { this.replaceWith(makeDefaultAvatar(name, sizeClass)) }
       return img
     }
     return makeDefaultAvatar(name, sizeClass)
@@ -805,7 +818,7 @@
   window.RochePlugin.register({
     id: "camp-helper",
     name: "王者营地",
-    version: "1.0.0",
+    version: "1.1.0",
     apps: [
       {
         id: "camp-helper-home",
@@ -839,14 +852,22 @@
             addFriendModalOpen: false,
             editing: false,
             matchExpanded: false,
-            matchData: null,
             matchLoading: false,
             friendMatchExpanded: false,
-            friendMatchData: null,
             friendMatchLoading: false,
             writeToMainMemory: false,
             shortTermLimit: 30,
+            // user 侧手动编辑战绩: { [personaId]: { rank, winRate, peakScore, heroPower, heroes } }
             statsMap: {},
+            // user 侧对局缓存: { [personaId]: [ matchItem, ... ] }
+            userMatchCache: {},
+            // char 侧 AI 战绩: { [charId]: { rank, winRate, peakScore, heroPower, heroes } }
+            charStatsMap: {},
+            // char 侧对局缓存: { [charId]: [ matchItem, ... ] }
+            charMatchCache: {},
+            // char 战绩生成中标记
+            charStatsLoading: false,
+            // 好友面具绑定: { [charId]: personaId }
             friendPersonaBindings: {},
           }
           app._state = state
@@ -857,6 +878,15 @@
 
           const savedStats = await roche.storage.get("statsMap")
           if (savedStats && typeof savedStats === "object") state.statsMap = savedStats
+
+          const savedUserMatchCache = await roche.storage.get("userMatchCache")
+          if (savedUserMatchCache && typeof savedUserMatchCache === "object") state.userMatchCache = savedUserMatchCache
+
+          const savedCharStatsMap = await roche.storage.get("charStatsMap")
+          if (savedCharStatsMap && typeof savedCharStatsMap === "object") state.charStatsMap = savedCharStatsMap
+
+          const savedCharMatchCache = await roche.storage.get("charMatchCache")
+          if (savedCharMatchCache && typeof savedCharMatchCache === "object") state.charMatchCache = savedCharMatchCache
 
           const savedSettings = await roche.storage.get("settings")
           if (savedSettings) {
@@ -900,16 +930,33 @@
             root.appendChild(renderAddFriendModal())
           }
 
-          /* ── 顶栏 ── */
+          /* ── 顶栏（修改点4：合并返回键） ── */
           function renderTopbar() {
             const bar = el("div", { className: "ch-topbar" })
             const left = el("div", { className: "ch-topbar-left" })
 
-            left.appendChild(el("button", {
-              className: "ch-back-btn",
-              innerHTML: "← 返回",
-              onClick() { roche.ui.closeApp() }
-            }))
+            // 根据当前视图决定左侧返回按钮行为
+            if (state.view === "friendDetail") {
+              // Char 详情页：返回主页
+              left.appendChild(el("button", {
+                className: "ch-back-btn",
+                innerHTML: "← 返回主页",
+                onClick() {
+                  state.view = "home"
+                  state.friendDetailCharId = null
+                  state.friendMatchExpanded = false
+                  state.charStatsLoading = false
+                  render()
+                }
+              }))
+            } else {
+              // 主页/设置页：关闭 App
+              left.appendChild(el("button", {
+                className: "ch-back-btn",
+                innerHTML: "← 返回",
+                onClick() { roche.ui.closeApp() }
+              }))
+            }
 
             const title = el("span", { className: "ch-topbar-title" })
             if (state.view === "settings") title.textContent = "设置"
@@ -924,20 +971,7 @@
 
             const right = el("div", { className: "ch-topbar-right" })
 
-            if (state.view === "friendDetail") {
-              right.appendChild(el("button", {
-                className: "ch-back-btn",
-                innerHTML: "← 主页",
-                onClick() {
-                  state.view = "home"
-                  state.friendDetailCharId = null
-                  state.friendMatchExpanded = false
-                  state.friendMatchData = null
-                  render()
-                }
-              }))
-            }
-
+            // 设置按钮（不在 friendDetail 右侧放多余按钮了）
             if (state.view !== "settings") {
               right.appendChild(el("button", {
                 className: "ch-settings-btn",
@@ -977,7 +1011,6 @@
                   state.activePersonaId = p.id
                   state.editing = false
                   state.matchExpanded = false
-                  state.matchData = null
                   render()
                 }
               })
@@ -1008,7 +1041,6 @@
             const stats = getCurrentStats()
             const card = el("div", { className: "ch-profile-card" })
 
-            // 头像区
             const header = el("div", { className: "ch-profile-header" })
             const av = avatarEl(persona.avatar, persona.handle || persona.name, "xlarge")
             if (!av.classList.contains("ch-profile-avatar")) av.classList.add("ch-profile-avatar")
@@ -1020,7 +1052,6 @@
             header.appendChild(info)
             card.appendChild(header)
 
-            // 编辑按钮
             if (!state.editing) {
               card.appendChild(el("button", {
                 className: "ch-edit-btn",
@@ -1037,7 +1068,10 @@
             }
 
             main.appendChild(card)
+
+            // 对局战绩 - user 侧（持久化）
             main.appendChild(renderMatchSection(false))
+
             return main
           }
 
@@ -1045,7 +1079,6 @@
           function renderStatsDisplay(stats) {
             const wrap = el("div")
             const grid = el("div", { className: "ch-stats-grid" })
-
             const items = [
               { label: "段位", value: stats.rank || "未设定", gold: true },
               { label: "胜率", value: stats.winRate ? stats.winRate + "%" : "—" },
@@ -1060,7 +1093,6 @@
             }
             wrap.appendChild(grid)
 
-            // 常用英雄
             const sec = el("div", { className: "ch-heroes-section" })
             sec.appendChild(el("div", { className: "ch-section-title" }, "常用英雄"))
             const tags = el("div", { className: "ch-hero-tags" })
@@ -1114,7 +1146,6 @@
                 state.editing = false
                 roche.ui.toast("战绩已保存")
 
-                // 写入主记忆
                 if (state.writeToMainMemory) {
                   const persona = state.personas.find(p => p.id === pid)
                   const pname = persona ? (persona.name || persona.handle || "用户") : "用户"
@@ -1156,22 +1187,36 @@
             return form
           }
 
-          /* ── 对局战绩区域 ── */
+          /* ══════════════════════════════════════
+           * 对局战绩区域（修改点1：持久化 + 刷新）
+           * ══════════════════════════════════════ */
           function renderMatchSection(isFriend) {
             const section = el("div", { className: "ch-match-section" })
             const expanded = isFriend ? state.friendMatchExpanded : state.matchExpanded
-            const matchData = isFriend ? state.friendMatchData : state.matchData
             const loading = isFriend ? state.friendMatchLoading : state.matchLoading
+
+            // 读取缓存
+            let cachedData = null
+            if (isFriend) {
+              cachedData = state.charMatchCache[state.friendDetailCharId] || null
+            } else {
+              cachedData = state.userMatchCache[state.activePersonaId] || null
+            }
 
             section.appendChild(el("div", {
               className: "ch-match-toggle",
               async onClick() {
                 if (isFriend) {
                   state.friendMatchExpanded = !state.friendMatchExpanded
-                  if (state.friendMatchExpanded && !state.friendMatchData) await loadMatchData(true)
+                  // 首次展开且无缓存才自动生成
+                  if (state.friendMatchExpanded && !state.charMatchCache[state.friendDetailCharId]) {
+                    await generateAndCacheMatches(true)
+                  }
                 } else {
                   state.matchExpanded = !state.matchExpanded
-                  if (state.matchExpanded && !state.matchData) await loadMatchData(false)
+                  if (state.matchExpanded && !state.userMatchCache[state.activePersonaId]) {
+                    await generateAndCacheMatches(false)
+                  }
                 }
                 render()
               }
@@ -1186,8 +1231,8 @@
               const ld = el("div", { className: "ch-match-loading" })
               ld.innerHTML = '<div class="ch-match-loading-spinner"></div><div style="margin-top:8px;">正在让 AI 生成对局记录…</div>'
               list.appendChild(ld)
-            } else if (matchData && matchData.length > 0) {
-              for (const m of matchData) {
+            } else if (cachedData && cachedData.length > 0) {
+              for (const m of cachedData) {
                 const item = el("div", { className: "ch-match-item" })
                 item.appendChild(el("div", {
                   className: `ch-match-result ${m.result === "win" ? "win" : "lose"}`
@@ -1205,23 +1250,29 @@
                 list.appendChild(item)
               }
 
+              // 刷新按钮
               const refreshRow = el("div", { style: "text-align:center;padding:8px 0 4px;" })
               refreshRow.appendChild(el("button", {
                 className: "ch-btn ch-btn-secondary",
                 style: "font-size:12px;padding:6px 14px;",
-                async onClick() { await loadMatchData(isFriend); render() }
-              }, "🔄 重新生成"))
+                async onClick() {
+                  await generateAndCacheMatches(isFriend)
+                  render()
+                }
+              }, "🔄 刷新对局"))
               list.appendChild(refreshRow)
             } else if (expanded && !loading) {
-              list.appendChild(el("div", { className: "ch-empty-hint" }, "暂无对局数据"))
+              list.appendChild(el("div", { className: "ch-empty-hint" }, "暂无对局数据，展开后自动生成"))
             }
 
             section.appendChild(list)
             return section
           }
 
-          /* ── AI 生成对局数据 ── */
-          async function loadMatchData(isFriend) {
+          /* ══════════════════════════════════════════
+           * AI 生成 + 持久化缓存（统一函数）
+           * ══════════════════════════════════════════ */
+          async function generateAndCacheMatches(isFriend) {
             if (isFriend) state.friendMatchLoading = true
             else state.matchLoading = true
             render()
@@ -1229,6 +1280,7 @@
             try {
               let targetName = ""
               let personaText = ""
+              let heroesStr = ""
               let contextParts = []
 
               if (isFriend) {
@@ -1237,13 +1289,20 @@
                 targetName = char.handle || char.name || "角色"
                 personaText = char.persona || char.bio || ""
 
-                // 绑定面具信息
+                // char 侧战绩（AI生成的）
+                const charStats = state.charStatsMap[char.id]
+                if (charStats) {
+                  heroesStr = charStats.heroes || ""
+                  contextParts.push(`该角色战绩：段位 ${charStats.rank || "未知"}，胜率 ${charStats.winRate || "未知"}%，常用英雄 ${charStats.heroes || "未知"}`)
+                }
+
+                // 绑定面具辅助参考
                 const boundPid = state.friendPersonaBindings[char.id]
                 if (boundPid) {
                   const bp = state.personas.find(p => p.id === boundPid)
                   const bs = state.statsMap[boundPid]
                   if (bp && bs) {
-                    contextParts.push(`绑定面具（${bp.handle || bp.name}）战绩：段位 ${bs.rank || "未知"}，胜率 ${bs.winRate || "未知"}%，常用英雄 ${bs.heroes || "未知"}`)
+                    contextParts.push(`（参考）绑定面具（${bp.handle || bp.name}）战绩：段位 ${bs.rank || "未知"}，胜率 ${bs.winRate || "未知"}%`)
                   }
                 }
 
@@ -1274,6 +1333,7 @@
                 personaText = persona.persona || persona.bio || ""
 
                 const stats = getCurrentStats()
+                heroesStr = stats.heroes || ""
                 if (stats.rank || stats.heroes) {
                   contextParts.push(`当前战绩：段位 ${stats.rank || "未知"}，胜率 ${stats.winRate || "未知"}%，巅峰分 ${stats.peakScore || "未知"}，常用英雄 ${stats.heroes || "未知"}`)
                 }
@@ -1303,18 +1363,39 @@
                 } catch (e) {}
               }
 
+              // 修改点3：英雄分配 prompt
+              const heroList = heroesStr ? heroesStr.split(/[,，\s]+/).filter(Boolean) : []
+              let heroInstruction = ""
+              if (heroList.length > 0) {
+                heroInstruction = `
+英雄分配规则：
+- 该角色的常用英雄为：${heroList.join("、")}
+- 5 场对局中，约 2-3 场必须使用上述常用英雄中的某一个
+- 剩余 2-3 场从王者荣耀全英雄池中随机选取其他英雄（不要重复常用英雄）
+- 每场使用不同英雄，不要重复`
+              } else {
+                heroInstruction = `
+英雄分配规则：
+- 该角色没有设定常用英雄
+- 5 场对局全部从王者荣耀全英雄池中随机选取不同英雄
+- 每场使用不同英雄，不要重复`
+              }
+
+              // 修改点5：心声口语化 prompt
               const systemPrompt = `你是一位王者荣耀战报生成器。请根据以下角色的人设和记忆内容，生成 5 场最近的对局记录。
 
 角色名：${targetName}
 ${personaText ? "角色人设：" + personaText : ""}
 ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : ""}
+${heroInstruction}
 
 要求：
 1. 以纯 JSON 数组格式输出，不要有任何其他文字或 markdown 标记
-2. 每场对局包含字段：time (字符串，如"今天 14:30"), hero (英雄名), kda (格式如"5/2/8"), result ("win"或"lose"), innerVoice (角色内心独白，一句话，符合角色性格)
-3. 对局内容要结合角色性格和记忆内容创作，让内心独白生动有趣
-4. 时间分布在最近 1-3 天内
-5. 胜负大约各半，略偏向胜利
+2. 每场对局包含字段：time (字符串，如"今天 14:30"或"昨天 21:15"), hero (英雄名), kda (格式如"5/2/8"), result ("win"或"lose"), innerVoice (角色内心独白)
+3. innerVoice 要求：生活化口语化，像真实玩家游戏时的即时心理活动。不要书面语或文艺台词，可以用语气词、网络用语。示例："完了这波我裂开了"、"嘿嘿这波秀不秀"、"对面打野是不是住上路了"、"队友你认真的吗"、"稳了稳了这把mvp是我的"
+4. innerVoice 要结合角色性格，让独白符合这个角色的说话风格
+5. 时间分布在最近 1-3 天内
+6. 胜负大约各半，略偏向胜利
 
 只输出 JSON 数组，不要输出任何解释。`
 
@@ -1332,15 +1413,114 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
                 const jsonMatch = text.match(/\[[\s\S]*\]/)
                 if (jsonMatch) matches = JSON.parse(jsonMatch[0])
               } catch (e) {
-                matches = [{ time: "刚刚", hero: "妲己", kda: "3/2/5", result: "win", innerVoice: "AI 返回格式异常，这是默认数据" }]
+                matches = [{ time: "刚刚", hero: "妲己", kda: "3/2/5", result: "win", innerVoice: "AI返回格式有点问题啊…先凑合看吧" }]
               }
 
-              if (isFriend) { state.friendMatchData = matches; state.friendMatchLoading = false }
-              else { state.matchData = matches; state.matchLoading = false }
+              // 持久化缓存
+              if (isFriend) {
+                state.charMatchCache[state.friendDetailCharId] = matches
+                state.friendMatchLoading = false
+                await roche.storage.set("charMatchCache", state.charMatchCache)
+              } else {
+                state.userMatchCache[state.activePersonaId] = matches
+                state.matchLoading = false
+                await roche.storage.set("userMatchCache", state.userMatchCache)
+              }
             } catch (e) {
               const errItem = [{ time: "—", hero: "—", kda: "—", result: "lose", innerVoice: "加载失败：" + (e.message || e) }]
-              if (isFriend) { state.friendMatchData = errItem; state.friendMatchLoading = false }
-              else { state.matchData = errItem; state.matchLoading = false }
+              if (isFriend) {
+                state.charMatchCache[state.friendDetailCharId] = errItem
+                state.friendMatchLoading = false
+                await roche.storage.set("charMatchCache", state.charMatchCache)
+              } else {
+                state.userMatchCache[state.activePersonaId] = errItem
+                state.matchLoading = false
+                await roche.storage.set("userMatchCache", state.userMatchCache)
+              }
+            }
+          }
+
+          /* ══════════════════════════════════════════════
+           * AI 生成 Char 战绩数据（修改点2）
+           * ══════════════════════════════════════════════ */
+          async function generateCharStats(charId) {
+            const char = state.characters.find(c => c.id === charId)
+            if (!char) return
+
+            state.charStatsLoading = true
+            render()
+
+            try {
+              const targetName = char.handle || char.name || "角色"
+              const personaText = char.persona || char.bio || ""
+              let contextParts = []
+
+              const convId = char.conversationId
+              if (convId) {
+                try {
+                  const lt = await roche.memory.getLongTerm({ conversationId: convId, limit: 100 })
+                  if (lt) {
+                    if (lt.core?.summary) contextParts.push("核心记忆：" + lt.core.summary)
+                    if (lt.facts?.length) {
+                      const ft = lt.facts.map(f => f.summaryText || f.action || "").filter(Boolean).join("；")
+                      if (ft) contextParts.push("事实记忆：" + ft)
+                    }
+                  }
+                } catch (e) {}
+                try {
+                  const st = await roche.memory.getShortTerm({ conversationId: convId, limit: state.shortTermLimit })
+                  if (st && st.length > 0) {
+                    contextParts.push("近期聊天：\n" + st.slice(-15).map(m => `${m.senderHandle || m.senderName || "?"}: ${m.text || ""}`).join("\n"))
+                  }
+                } catch (e) {}
+              }
+
+              const prompt = `你是一位王者荣耀玩家资料生成器。请根据以下角色的人设和记忆，为这个角色虚构一份王者荣耀战绩资料。
+
+角色名：${targetName}
+${personaText ? "角色人设：" + personaText : ""}
+${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : ""}
+
+请以纯 JSON 对象格式输出，不要有任何其他文字或 markdown 标记。字段如下：
+- rank: 段位（如"星耀III"、"王者28星"、"钻石I"等，要符合角色性格）
+- winRate: 胜率数字（如"52.1"，不带%）
+- peakScore: 巅峰赛分数（如"1650"，如果段位不够高可以留空字符串）
+- heroPower: 英雄战力标（如"市标"、"省标"、"无"等）
+- heroes: 常用英雄（3-5个英雄名，逗号分隔，要符合角色性格）
+
+只输出 JSON 对象。`
+
+              const result = await roche.ai.chat({
+                messages: [
+                  { role: "system", content: prompt },
+                  { role: "user", content: "请为 " + targetName + " 生成王者荣耀战绩资料。" }
+                ],
+                temperature: 0.8
+              })
+
+              let charStats = { rank: "", winRate: "", peakScore: "", heroPower: "", heroes: "" }
+              try {
+                const text = result.text || ""
+                const jsonMatch = text.match(/\{[\s\S]*\}/)
+                if (jsonMatch) {
+                  const parsed = JSON.parse(jsonMatch[0])
+                  charStats.rank = String(parsed.rank || "")
+                  charStats.winRate = String(parsed.winRate || "")
+                  charStats.peakScore = String(parsed.peakScore || "")
+                  charStats.heroPower = String(parsed.heroPower || "")
+                  charStats.heroes = String(parsed.heroes || "")
+                }
+              } catch (e) {
+                charStats = { rank: "黄金I", winRate: "48.5", peakScore: "", heroPower: "无", heroes: "妲己, 安琪拉, 亚瑟" }
+              }
+
+              state.charStatsMap[charId] = charStats
+              state.charStatsLoading = false
+              await roche.storage.set("charStatsMap", state.charStatsMap)
+            } catch (e) {
+              state.charStatsMap[charId] = { rank: "未知", winRate: "—", peakScore: "", heroPower: "", heroes: "" }
+              state.charStatsLoading = false
+              await roche.storage.set("charStatsMap", state.charStatsMap)
             }
           }
 
@@ -1348,11 +1528,9 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
           function renderSettings() {
             const wrap = el("div", { className: "ch-main ch-settings" })
 
-            // 记忆设置
             const memSec = el("div", { className: "ch-settings-section" })
             memSec.appendChild(el("div", { className: "ch-settings-section-title" }, "记忆设置"))
 
-            // 写入主记忆开关
             const writeRow = el("div", { className: "ch-settings-row" })
             const writeInfo = el("div")
             writeInfo.appendChild(el("div", { className: "ch-settings-label" }, "允许写入 Roche 主记忆"))
@@ -1374,7 +1552,6 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
             writeRow.appendChild(toggleWrap)
             memSec.appendChild(writeRow)
 
-            // 消息条数
             const limitRow = el("div", { className: "ch-settings-row" })
             const limitInfo = el("div")
             limitInfo.appendChild(el("div", { className: "ch-settings-label" }, "AI 读取近期消息条数"))
@@ -1397,7 +1574,6 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
             memSec.appendChild(limitRow)
             wrap.appendChild(memSec)
 
-            // 数据管理
             const dataSec = el("div", { className: "ch-settings-section" })
             dataSec.appendChild(el("div", { className: "ch-settings-section-title" }, "数据管理"))
 
@@ -1408,13 +1584,19 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
               async onClick() {
                 const ok = await roche.ui.confirm({
                   title: "确认清空",
-                  message: "确定要清空所有手动编辑的战绩数据吗？\n此操作不可撤销。\n\n已写入 Roche 主记忆的数据不会被删除。"
+                  message: "确定要清空所有战绩数据吗？\n包括手动编辑的战绩、AI生成的角色战绩、所有对局缓存、好友列表。\n此操作不可撤销。\n\n已写入 Roche 主记忆的数据不会被删除。"
                 })
                 if (ok) {
                   state.statsMap = {}
+                  state.userMatchCache = {}
+                  state.charStatsMap = {}
+                  state.charMatchCache = {}
                   state.friends = []
                   state.friendPersonaBindings = {}
                   await roche.storage.set("statsMap", {})
+                  await roche.storage.set("userMatchCache", {})
+                  await roche.storage.set("charStatsMap", {})
+                  await roche.storage.set("charMatchCache", {})
                   await roche.storage.set("friends", [])
                   await roche.storage.set("friendPersonaBindings", {})
                   roche.ui.toast("已清空所有数据")
@@ -1464,8 +1646,12 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
                   state.friendDetailCharId = fid
                   state.sidebarOpen = false
                   state.friendMatchExpanded = false
-                  state.friendMatchData = null
+                  state.charStatsLoading = false
                   render()
+                  // 首次进入若无战绩则自动生成
+                  if (!state.charStatsMap[fid]) {
+                    generateCharStats(fid).then(() => render())
+                  }
                 }
                 item.appendChild(av)
 
@@ -1477,8 +1663,11 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
                     state.friendDetailCharId = fid
                     state.sidebarOpen = false
                     state.friendMatchExpanded = false
-                    state.friendMatchData = null
+                    state.charStatsLoading = false
                     render()
+                    if (!state.charStatsMap[fid]) {
+                      generateCharStats(fid).then(() => render())
+                    }
                   }
                 }, char.handle || char.name || "未命名"))
 
@@ -1488,8 +1677,12 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
                     e.stopPropagation()
                     state.friends = state.friends.filter(id => id !== fid)
                     delete state.friendPersonaBindings[fid]
+                    delete state.charStatsMap[fid]
+                    delete state.charMatchCache[fid]
                     await roche.storage.set("friends", state.friends)
                     await roche.storage.set("friendPersonaBindings", state.friendPersonaBindings)
+                    await roche.storage.set("charStatsMap", state.charStatsMap)
+                    await roche.storage.set("charMatchCache", state.charMatchCache)
                     render()
                   }
                 }, "✕"))
@@ -1569,7 +1762,9 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
             return overlay
           }
 
-          /* ── 好友详情页 ── */
+          /* ══════════════════════════════════════════════
+           * 好友详情页（修改点2：独立 AI 战绩，无编辑按钮）
+           * ══════════════════════════════════════════════ */
           function renderFriendDetail() {
             const wrap = el("div", { className: "ch-main ch-friend-detail" })
             const charId = state.friendDetailCharId
@@ -1592,23 +1787,43 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
             header.appendChild(info)
             card.appendChild(header)
 
-            // 绑定面具的战绩展示
+            // Char 战绩展示（AI 生成，无编辑按钮）
+            const charStats = state.charStatsMap[charId]
+
+            if (state.charStatsLoading) {
+              const loadingDiv = el("div", { className: "ch-char-stats-loading" })
+              loadingDiv.innerHTML = '<div class="ch-match-loading-spinner"></div><div style="margin-top:8px;">正在为角色生成战绩资料…</div>'
+              card.appendChild(loadingDiv)
+            } else if (charStats) {
+              // 展示战绩
+              card.appendChild(renderStatsDisplay(charStats))
+
+              // 刷新战绩按钮
+              const refreshRow = el("div", { className: "ch-char-stats-refresh" })
+              refreshRow.appendChild(el("button", {
+                className: "ch-btn ch-btn-secondary",
+                style: "font-size:12px;padding:5px 12px;",
+                async onClick() {
+                  await generateCharStats(charId)
+                  render()
+                }
+              }, "🔄 刷新战绩"))
+              card.appendChild(refreshRow)
+            } else {
+              card.appendChild(el("div", { className: "ch-char-stats-loading" }, "战绩数据为空，正在生成…"))
+              // 自动触发生成
+              generateCharStats(charId).then(() => render())
+            }
+
+            // 绑定面具辅助参考
             const boundPid = state.friendPersonaBindings[charId]
             if (boundPid) {
               const bs = state.statsMap[boundPid]
-              if (bs && (bs.rank || bs.winRate)) {
-                const grid = el("div", { className: "ch-stats-grid" })
-                const items = [
-                  { label: "段位（绑定面具）", value: bs.rank || "—", gold: true },
-                  { label: "胜率（绑定面具）", value: bs.winRate ? bs.winRate + "%" : "—" }
-                ]
-                for (const it of items) {
-                  const si = el("div", { className: "ch-stat-item" })
-                  si.appendChild(el("div", { className: "ch-stat-label" }, it.label))
-                  si.appendChild(el("div", { className: `ch-stat-value ${it.gold ? "gold" : ""}` }, it.value))
-                  grid.appendChild(si)
-                }
-                card.appendChild(grid)
+              const bp = state.personas.find(p => p.id === boundPid)
+              if (bs && bp && (bs.rank || bs.winRate)) {
+                const refSection = el("div", { style: "margin-top:8px;padding:8px 12px;background:rgba(255,255,255,0.02);border-radius:8px;border:1px solid rgba(255,255,255,0.04);" })
+                refSection.appendChild(el("div", { style: "font-size:11px;color:#666;margin-bottom:4px;" }, `📎 绑定面具参考（${bp.handle || bp.name}）：段位 ${bs.rank || "—"}，胜率 ${bs.winRate || "—"}%`))
+                card.appendChild(refSection)
               }
             }
 
@@ -1638,7 +1853,10 @@ ${contextParts.length > 0 ? "\n背景信息：\n" + contextParts.join("\n\n") : 
             card.appendChild(bindRow)
 
             wrap.appendChild(card)
+
+            // Char 对局战绩（持久化）
             wrap.appendChild(renderMatchSection(true))
+
             return wrap
           }
 
