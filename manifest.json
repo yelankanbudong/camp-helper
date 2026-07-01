@@ -1,8 +1,8 @@
 {
   "id": "camp-helper",
   "name": "王者营地",
-  "version": "1.3.0",
-  "description": "类似王者营地的个人战绩与好友战绩看板，支持手动编辑和 AI 虚构对局。",
+  "version": "1.4.0",
+  "description": "类似王者营地的个人战绩与好友战绩看板，支持手动编辑和 AI 虚构对局。目前有的界面：1.user自定义总战绩，编辑并保存。2.char的总战绩，对局战绩可刷新，可保存到记忆。（不想保存只想看一下不要开保存按钮）",
   "author": "yelankanbudong",
   "entry": "https://raw.githubusercontent.com/yelankanbudong/camp-helper/main/camp-helper.js",
   "hash": "",
